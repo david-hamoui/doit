@@ -5,3 +5,6 @@ env/
 client_secret.json
 bot.db
 __pycache__/
+.vscode/
+.DS_Store
+**/.DS_Store
