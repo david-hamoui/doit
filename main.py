@@ -166,7 +166,11 @@ def callback():
             print(f"Failed to fetch timezone: {e}")
             
         # Save the refresh token and timezone to our SQLite database
-        save_user_token(telegram_id, credentials.refresh_token, timezone=user_timezone)
+        conn = sqlite3.connect('bot.db')
+        cursor = conn.cursor()
+        cursor.execute('REPLACE INTO users (telegram_id, refresh_token, timezone) VALUES (?, ?, ?)', (telegram_id, credentials.refresh_token, user_timezone))
+        conn.commit()
+        conn.close()
         
         # Proactively message the user
         bot_token = os.environ.get("TELEGRAM_TOKEN")
@@ -312,12 +316,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         telegram_id = update.effective_user.id
         user_data = get_user_data(telegram_id)
         
-        if not user_data:
+        if not user_data or "refresh_token" not in user_data:
             await update.message.reply_text("Please /start and log in first!")
             return
             
         token = user_data["refresh_token"]
-        user_timezone = user_data["timezone"]
+        user_timezone = user_data.get("timezone", "UTC")
 
         if is_voice:
             status_msg = await update.message.reply_text('🎙️ Listening & Processing...')
@@ -443,6 +447,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary = event_data.get('summary', 'Untitled Event')
             start_time = event_data.get('start_time')
             end_time = event_data.get('end_time')
+            
+            if action == 'create' and not start_time:
+                await status_msg.edit_text("I couldn't find a clear date or time. Try saying 'Lunch tomorrow at 1pm'.")
+                return
             
             # --- TIMESTAMP SANITIZATION ---
             # If Gemini only returned a date for end_time (or null), make it 1 hour after start_time
