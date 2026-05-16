@@ -1,0 +1,7 @@
+.env
+.venv/
+venv/
+env/
+client_secret.json
+bot.db
+__pycache__/
