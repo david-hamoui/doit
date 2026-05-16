@@ -15,11 +15,13 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 from telegram.constants import ParseMode
 import google.generativeai as genai
 import zoneinfo
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Load environment variables from .env
 load_dotenv()
 
 app = flask.Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 # A secret key is required to use Flask sessions securely
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_dev_key")
 
@@ -107,7 +109,8 @@ def login():
     )
 
     # Set the redirect URI to match the /callback route on our server
-    flow.redirect_uri = flask.url_for('callback', _external=True)
+    base_url = os.environ.get('BASE_URL', 'https://ai-assistant-3740.onrender.com').rstrip('/')
+    flow.redirect_uri = f"{base_url}/callback"
 
     # Generate the authorization URL
     authorization_url, state = flow.authorization_url(
@@ -136,7 +139,8 @@ def callback():
         scopes=SCOPES,
         state=state
     )
-    flow.redirect_uri = flask.url_for('callback', _external=True)
+    base_url = os.environ.get('BASE_URL', 'https://ai-assistant-3740.onrender.com').rstrip('/')
+    flow.redirect_uri = f"{base_url}/callback"
     flow.code_verifier = flask.session.get('code_verifier')
 
     # Use the authorization server's response to fetch the OAuth 2.0 tokens
