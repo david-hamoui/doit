@@ -42,8 +42,11 @@ SCOPES = [
 ]
 
 # --- Database Setup ---
+def get_db_connection():
+    return sqlite3.connect('bot.db')
+
 def init_db():
-    conn = sqlite3.connect('bot.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -59,7 +62,7 @@ def init_db():
     conn.close()
 
 def get_user_data(telegram_id):
-    conn = sqlite3.connect('bot.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT refresh_token, timezone FROM users WHERE telegram_id = ?', (telegram_id,))
@@ -79,7 +82,7 @@ def get_user_token(telegram_id):
     return data["refresh_token"] if data else None
 
 def save_user_token(telegram_id, refresh_token, timezone="UTC"):
-    conn = sqlite3.connect('bot.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     # REPLACE INTO works like an UPSERT in SQLite, updating the row if the primary key exists
     cursor.execute('REPLACE INTO users (telegram_id, refresh_token, timezone) VALUES (?, ?, ?)', (telegram_id, refresh_token, timezone))
@@ -93,11 +96,11 @@ def index():
 
 @app.route('/privacy')
 def privacy_policy():
-    return "<h1>Privacy Policy</h1><p>This app accesses your calendar solely to add/delete/edit/read events your events in said calendar. Additionally, we do not store any of your conversations, events modified/created, or any other personal data (aside from your refresh token, and google user id).</p>"
+    return "<h1>Privacy Policy</h1><p>This application integrates with Google Calendar to help you manage your events. We only access your calendar to create, read, update, and delete events as requested by you. We do not store your personal conversations, event details, or any other personal data on our servers, other than your authentication tokens necessary to provide the service.</p>"
 
 @app.route('/terms')
 def terms_of_service():
-    return "<h1>Terms of Service</h1><p>Usage of this bot is intended for scheduling support. The developers are not responsible for any damages caused by the misuse of this bot. Additionally, the developers are not responsible for any calendar events that are created, modified, or deleted by this bot.</p>"
+    return "<h1>Terms of Service</h1><p>By using this bot, you agree that it is provided 'as is' for scheduling support. The developers are not responsible for any damages or issues caused by the use or misuse of this bot, nor are they responsible for any calendar events that are created, modified, or deleted through its usage.</p>"
 
 @app.route('/login')
 def login():
@@ -174,7 +177,7 @@ def callback():
             print(f"Failed to fetch timezone: {e}")
             
         # Save the refresh token and timezone to our SQLite database
-        conn = sqlite3.connect('bot.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('REPLACE INTO users (telegram_id, refresh_token, timezone) VALUES (?, ?, ?)', (telegram_id, credentials.refresh_token, user_timezone))
         conn.commit()
@@ -574,30 +577,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-def run_flask():
-    # Run the Flask server. Bind to 0.0.0.0 and dynamically assign port for Render.
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-if __name__ == '__main__':
-    # 1. Initialize Database
-    init_db()
-    
-    # 2. Start Flask in a background thread
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    # 3. Start Telegram Bot on the main thread
-    bot_token = os.environ.get("TELEGRAM_TOKEN")
-    if not bot_token:
-        print("Error: TELEGRAM_TOKEN not found in .env file.")
-        exit(1)
-        
+# --- Telegram Bot Webhook Integration ---
+bot_token = os.environ.get("TELEGRAM_TOKEN")
+if bot_token:
     application = ApplicationBuilder().token(bot_token).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("agenda", agenda))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_message))
     
-    print("Starting Telegram Bot and Flask server...")
-    application.run_polling()
+    base_url = os.environ.get('BASE_URL', 'https://ai-assistant-3740.onrender.com').rstrip('/')
+    webhook_url = f"{base_url}/telegram-webhook"
+    
+    try:
+        asyncio.run(application.bot.set_webhook(url=webhook_url))
+        print(f"Webhook set to {webhook_url}")
+    except Exception as e:
+        print(f"Failed to set webhook: {e}")
+else:
+    application = None
+    print("Warning: TELEGRAM_TOKEN not found in .env file.")
+
+bot_loop = None
+bot_thread = None
+bot_lock = threading.Lock()
+
+def get_bot_loop():
+    global bot_loop, bot_thread
+    with bot_lock:
+        if bot_loop is None or not bot_loop.is_running():
+            bot_loop = asyncio.new_event_loop()
+            def run_loop(loop):
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+            bot_thread = threading.Thread(target=run_loop, args=(bot_loop,), daemon=True)
+            bot_thread.start()
+            
+            if application:
+                future_init = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
+                future_init.result()
+    return bot_loop
+
+@app.route('/telegram-webhook', methods=['POST'])
+def telegram_webhook():
+    if application:
+        try:
+            update = Update.de_json(flask.request.get_json(force=True), application.bot)
+            loop = get_bot_loop()
+            asyncio.run_coroutine_threadsafe(application.process_update(update), loop).result()
+        except Exception as e:
+            print(f"Error processing update: {e}")
+    return 'ok'
+
+if __name__ == '__main__':
+    # 1. Initialize Database
+    init_db()
+    
+    # 2. Start Flask server
+    port = int(os.environ.get('PORT', 8080))
+    print(f"Starting Flask server on port {port}...")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
