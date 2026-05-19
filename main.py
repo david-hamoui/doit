@@ -1,7 +1,7 @@
 import os
 import flask
 import secrets
-import sqlite3
+import psycopg2
 import threading
 import datetime
 import json
@@ -43,35 +43,35 @@ SCOPES = [
 
 # --- Database Setup ---
 def get_db_connection():
-    return sqlite3.connect('bot.db')
+    return psycopg2.connect(os.environ.get('DATABASE_URL'))
 
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            telegram_id INTEGER PRIMARY KEY,
-            refresh_token TEXT
-        )
-    ''')
     try:
-        cursor.execute('ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT "UTC"')
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    conn.close()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id BIGINT PRIMARY KEY,
+                refresh_token TEXT,
+                timezone TEXT DEFAULT 'UTC'
+            )
+        ''')
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("Database initialized successfully.")
+    except Exception as e:
+        print(f"Failed to initialize database: {e}")
+
+# Run initialization automatically on module import (for WSGI servers like Gunicorn)
+init_db()
 
 def get_user_data(telegram_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    try:
-        cursor.execute('SELECT refresh_token, timezone FROM users WHERE telegram_id = ?', (telegram_id,))
-        row = cursor.fetchone()
-    except sqlite3.OperationalError:
-        cursor.execute('SELECT refresh_token FROM users WHERE telegram_id = ?', (telegram_id,))
-        row = cursor.fetchone()
-        if row:
-            row = (row[0], "UTC")
+    cursor.execute('SELECT refresh_token, timezone FROM users WHERE telegram_id = %s', (telegram_id,))
+    row = cursor.fetchone()
+    cursor.close()
     conn.close()
     if row:
         return {"refresh_token": row[0], "timezone": row[1] if row[1] else "UTC"}
@@ -84,9 +84,15 @@ def get_user_token(telegram_id):
 def save_user_token(telegram_id, refresh_token, timezone="UTC"):
     conn = get_db_connection()
     cursor = conn.cursor()
-    # REPLACE INTO works like an UPSERT in SQLite, updating the row if the primary key exists
-    cursor.execute('REPLACE INTO users (telegram_id, refresh_token, timezone) VALUES (?, ?, ?)', (telegram_id, refresh_token, timezone))
+    query = '''
+        INSERT INTO users (telegram_id, refresh_token, timezone)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (telegram_id)
+        DO UPDATE SET refresh_token = EXCLUDED.refresh_token, timezone = EXCLUDED.timezone
+    '''
+    cursor.execute(query, (telegram_id, refresh_token, timezone))
     conn.commit()
+    cursor.close()
     conn.close()
 
 # --- Flask Routes ---
@@ -176,11 +182,18 @@ def callback():
         except Exception as e:
             print(f"Failed to fetch timezone: {e}")
             
-        # Save the refresh token and timezone to our SQLite database
+        # Save the refresh token and timezone to our PostgreSQL database
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('REPLACE INTO users (telegram_id, refresh_token, timezone) VALUES (?, ?, ?)', (telegram_id, credentials.refresh_token, user_timezone))
+        query = '''
+            INSERT INTO users (telegram_id, refresh_token, timezone)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (telegram_id)
+            DO UPDATE SET refresh_token = EXCLUDED.refresh_token, timezone = EXCLUDED.timezone
+        '''
+        cursor.execute(query, (telegram_id, credentials.refresh_token, user_timezone))
         conn.commit()
+        cursor.close()
         conn.close()
         
         # Proactively message the user
@@ -629,10 +642,7 @@ def telegram_webhook():
     return 'ok'
 
 if __name__ == '__main__':
-    # 1. Initialize Database
-    init_db()
-    
-    # 2. Start Flask server
+    # Start Flask server
     port = int(os.environ.get('PORT', 8080))
     print(f"Starting Flask server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
