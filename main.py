@@ -6,6 +6,8 @@ import threading
 import datetime
 import json
 import asyncio
+import axios
+import requests
 from dotenv import load_dotenv
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
@@ -637,6 +639,75 @@ def telegram_webhook():
             print(f"Error processing update: {e}")
     # Return 'ok' immediately so Telegram knows we got it
     return 'ok'
+
+# --- WhatsApp Bot Webhook Integration ---
+@app.route('/whatsapp-webhook', methods=['GET'])
+def whatsapp_verify():
+    # This must match the string you type into the Meta Dashboard "Verificar token" field
+    VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "my_secret_whatsapp_token_123")
+    
+    mode = flask.request.args.get('hub.mode')
+    token = flask.request.args.get('hub.verify_token')
+    challenge = flask.request.args.get('hub.challenge')
+    
+    if mode == 'subscribe' and token == VERIFY_TOKEN:
+        print("WhatsApp Webhook verified successfully!")
+        return challenge
+    return 'Forbidden', 403
+
+
+@app.route('/whatsapp-webhook', methods=['POST'])
+def whatsapp_webhook():
+    data = flask.request.get_json(force=True)
+
+    # Immediately acknowledge the webhook so Meta doesn't timeout and retry
+    # We process the AI part in the background or quickly before returning
+    try:
+        entry = data.get('entry', [{}])[0]
+        changes = entry.get('changes', [{}])[0]
+        value = changes.get('value', {})
+        message_list = value.get('messages', [])
+        
+        if message_list:
+            message = message_list[0]
+            if message.get('type') == 'text':
+                wa_id = message.get('from') # User's WhatsApp ID / Phone number
+                user_text = message.get('text', {}).get('body')
+                phone_number_id = value.get('metadata', {}).get('phone_number_id')
+                
+                # --- Send to Gemini AI ---
+                # Using the same model setup you have for Telegram
+                gemini_key = os.environ.get("GEMINI_API_KEY")
+                genai.configure(api_key=gemini_key)
+                model = genai.GenerativeModel('gemini-3.1-flash-lite')
+                
+                ai_prompt = f"The user is messaging you on WhatsApp. Keep your answer clear, friendly, and brief.\nUser: {user_text}"
+                response = model.generate_content(ai_prompt)
+                ai_reply = response.text.strip()
+                
+                # --- Send reply back to WhatsApp via Meta API ---
+                whatsapp_access_token = os.environ.get("WHATSAPP_ACCESS_TOKEN")
+                
+                whatsapp_url = f"https://graph.facebook.com/v20.0/{phone_number_id}/messages"
+                headers = {
+                    "Authorization": f"Bearer {whatsapp_access_token}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "messaging_product": "whatsapp",
+                    "to": wa_id,
+                    "type": "text",
+                    "text": {"body": ai_reply}
+                }
+                
+                req_res = requests.post(whatsapp_url, json=payload, headers=headers)
+                print(f"WhatsApp API Status: {req_res.status_code}, Response: {req_res.text}")
+                
+    except Exception as e:
+        print(f"Error handling WhatsApp webhook payload: {e}")
+        
+    return 'ok', 200
+
 
 if __name__ == '__main__':
     # Start Flask server
