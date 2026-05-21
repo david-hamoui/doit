@@ -19,7 +19,7 @@ import google.generativeai as genai
 import zoneinfo
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-# Load environment variables from .env
+# Load environment variables from .envv
 load_dotenv()
 
 app = flask.Flask(__name__)
