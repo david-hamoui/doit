@@ -660,7 +660,7 @@ def whatsapp_verify():
 def whatsapp_webhook():
     data = flask.request.get_json(force=True)
 
-    # Immediately acknowledge the webhook so Meta doesn't timeout and retry
+    # Immediately acknowledge the webhook so Meta doesn't timeout and retryy
     # We process the AI part in the background or quickly before returning
     try:
         entry = data.get('entry', [{}])[0]
